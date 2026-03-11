@@ -17,7 +17,8 @@ A minimalist macOS menu-bar screen recorder. Click to start. Click to stop. Done
 
 1. Download `ScreenRecorder.zip` from the [latest release](https://github.com/corychainsman/screen-recorder/releases/latest)
 2. Unzip and move `ScreenRecorder.app` to your Applications folder
-3. Launch it — grant Screen Recording and Microphone permissions when prompted
+3. **First launch:** macOS will warn that the developer cannot be verified. Go to **System Settings → Privacy & Security** and click **Open Anyway**, or right-click the app and choose **Open**
+4. Grant Screen Recording and Microphone permissions when prompted
 
 ## Usage
 

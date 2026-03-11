@@ -9,6 +9,7 @@ build:
 release:
 	swift build -c release
 	cp .build/release/ScreenRecorder $(APP_BINARY)
+	codesign --force --deep --sign - dist/ScreenRecorder.app
 
 clean:
 	swift package clean
