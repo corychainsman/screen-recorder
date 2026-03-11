@@ -77,6 +77,8 @@ final class ScreenRecorder: NSObject, ObservableObject {
             configuration.sampleRate = 48000
             configuration.channelCount = 2
             configuration.presenterOverlayPrivacyAlertSetting = .never
+            configuration.pixelFormat = kCVPixelFormatType_32BGRA
+            configuration.colorSpaceName = CGColorSpace.sRGB
             if #available(macOS 15.0, *) {
                 configuration.captureMicrophone = AppSettings.includeAudio
             }

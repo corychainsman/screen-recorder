@@ -37,10 +37,10 @@ Requires Xcode command-line tools.
 ```bash
 git clone https://github.com/corychainsman/screen-recorder.git
 cd screen-recorder
-swift build -c release
+make release
 ```
 
-The binary will be at `.build/release/ScreenRecorder`.
+The built `.app` bundle will be at `dist/ScreenRecorder.app`.
 
 ## License
 
