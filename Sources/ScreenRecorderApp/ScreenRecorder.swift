@@ -4,6 +4,122 @@ import CoreMedia
 import Foundation
 @preconcurrency import ScreenCaptureKit
 
+// MARK: - Permission management
+
+/// Manages screen-recording and microphone permission checks for macOS 15+.
+@MainActor
+enum PermissionManager {
+
+    // MARK: Status
+
+    /// Returns `true` when the process already holds screen-recording permission.
+    static var hasScreenRecordingPermission: Bool {
+        CGPreflightScreenCaptureAccess()
+    }
+
+    /// Returns `true` when microphone permission has been granted.
+    static var hasMicrophonePermission: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .authorized
+    }
+
+    /// Returns `true` when the microphone permission dialog may still appear
+    /// (i.e. the user has not yet made a decision).
+    static var isMicrophonePermissionUndecided: Bool {
+        AVCaptureDevice.authorizationStatus(for: .audio) == .notDetermined
+    }
+
+    // MARK: Requests
+
+    /// Triggers the screen-recording permission prompt if needed.
+    /// The system dialog is modal and blocks interaction with the app until dismissed.
+    @discardableResult
+    static func requestScreenRecordingPermission() -> Bool {
+        CGRequestScreenCaptureAccess()
+    }
+
+    /// Triggers the microphone permission prompt if needed.
+    /// Calls back on the main actor once the user responds.
+    static func requestMicrophonePermission() async {
+        await AVCaptureDevice.requestAccess(for: .audio)
+    }
+
+    // MARK: Wait-until-granted helpers
+
+    /// Requests screen-recording access and then waits until the system permission
+    /// dialog has been dismissed before returning.
+    ///
+    /// Detection strategy: `CGPreflightScreenCaptureAccess()` returns `false` for
+    /// both "not yet asked" and "denied" — there is no separate denied state via this
+    /// API.  The system dialog steals focus from the app, so we watch for the app to
+    /// become active again (via `NSApplication.didBecomeActiveNotification`) as a
+    /// reliable proxy for "the dialog was closed".  We also keep polling so that if
+    /// permission is granted before the app re-activates we return immediately.
+    ///
+    /// - Returns: `true` if permission is granted after the dialog, `false` if denied.
+    static func requestAndWaitForScreenRecording() async -> Bool {
+        guard !hasScreenRecordingPermission else { return true }
+
+        // Trigger the system prompt.
+        CGRequestScreenCaptureAccess()
+
+        // If the OS can determine immediately (e.g. already denied from a prior run
+        // without ever showing a new dialog) just return.
+        if !NSApp.isActive {
+            // The dialog stole focus — wait for the app to re-activate.
+            final class Box: @unchecked Sendable { var value: (any NSObjectProtocol)? }
+            let box = Box()
+            await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+                box.value = NotificationCenter.default.addObserver(
+                    forName: NSApplication.didBecomeActiveNotification,
+                    object: nil,
+                    queue: .main
+                ) { _ in
+                    if let o = box.value {
+                        NotificationCenter.default.removeObserver(o)
+                        box.value = nil
+                    }
+                    continuation.resume()
+                }
+            }
+        }
+
+        return CGPreflightScreenCaptureAccess()
+    }
+
+    /// Requests microphone access and waits for the user to respond.
+    /// - Returns: `true` if permission was granted, `false` if denied/restricted.
+    static func requestAndWaitForMicrophone() async -> Bool {
+        guard isMicrophonePermissionUndecided else {
+            return hasMicrophonePermission
+        }
+        return await AVCaptureDevice.requestAccess(for: .audio)
+    }
+
+    // MARK: Open System Settings
+
+    /// Opens the Privacy & Security > Screen Recording pane in System Settings.
+    static func openScreenRecordingSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    /// Opens the Privacy & Security > Microphone pane in System Settings.
+    static func openMicrophoneSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
+            NSWorkspace.shared.open(url)
+        }
+    }
+
+    // MARK: Output folder writability
+
+    /// Returns `true` when the app can write files into `directory`.
+    /// This is a live check — call it whenever the chosen folder changes.
+    static func hasWritePermission(for directory: URL) -> Bool {
+        FileManager.default.isWritableFile(atPath: directory.path)
+    }
+}
+
 enum AppSettings {
     static let outputDirectoryPathKey = "outputDirectoryPath"
     static let includeAudioKey = "includeAudio"

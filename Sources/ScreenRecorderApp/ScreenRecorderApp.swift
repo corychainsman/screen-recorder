@@ -121,11 +121,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
 
-        // Starting — check if multi-display selection is needed
+        // Starting — request any outstanding permissions first, then wait until
+        // every system dialog has been dismissed before proceeding.
         isToggling = true
         Task { @MainActor [weak self] in
             guard let self else { return }
 
+            // 1. Screen-recording permission — required; abort if denied.
+            let screenGranted = await PermissionManager.requestAndWaitForScreenRecording()
+            guard screenGranted else {
+                self.isToggling = false
+                return
+            }
+
+            // 2. Microphone permission — only needed when audio capture is enabled.
+            //    We wait for the dialog to close before continuing so recording does
+            //    not start while the permission sheet is still visible.
+            if AppSettings.includeAudio {
+                _ = await PermissionManager.requestAndWaitForMicrophone()
+                // We proceed regardless of the mic decision; ScreenCaptureKit will
+                // simply omit audio if permission was denied.
+            }
+
+            // 3. All dialogs are closed — now check for multi-display selection.
             do {
                 let content = try await SCShareableContent.current
                 let displays = content.displays
@@ -154,6 +172,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func revealInFinder(_ outputURL: URL) {
+        // activateFileViewerSelecting selects the file and opens its parent folder in
+        // Finder, but won't raise Finder's window if it's behind other windows.
+        // Explicitly activating Finder first ensures it comes to the front.
+        if let finder = NSRunningApplication.runningApplications(
+            withBundleIdentifier: "com.apple.finder"
+        ).first {
+            finder.activate()
+        }
         NSWorkspace.shared.activateFileViewerSelecting([outputURL])
     }
 
@@ -172,7 +198,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: host)
         window.title = "Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 520, height: 240))
+        // Let SwiftUI determine the intrinsic height; only pin the width.
+        host.view.setFrameSize(NSSize(width: 520, height: host.view.fittingSize.height))
+        window.setContentSize(host.view.frame.size)
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -450,9 +478,14 @@ struct SettingsView: View {
     @State private var outputDirectoryPath = AppSettings.outputDirectory.path
     @State private var includeAudio = AppSettings.includeAudio
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var hasScreenPermission = PermissionManager.hasScreenRecordingPermission
+    @State private var hasMicPermission = PermissionManager.hasMicrophonePermission
+    @State private var hasFolderPermission = PermissionManager.hasWritePermission(for: AppSettings.outputDirectory)
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
+
+            // MARK: Output folder
             Text("Output Folder")
                 .fontWeight(.bold)
 
@@ -469,11 +502,37 @@ struct SettingsView: View {
             Text("Recordings are saved as MP4 files in this directory.")
                 .foregroundStyle(.secondary)
 
+            // MARK: Audio + login toggles
             Toggle("Include audio from the default audio source", isOn: $includeAudio)
                 .toggleStyle(.checkbox)
 
             Toggle("Launch at login", isOn: $launchAtLogin)
                 .toggleStyle(.checkbox)
+
+            Divider()
+
+            // MARK: Permissions
+            Text("Permissions")
+                .fontWeight(.bold)
+
+            VStack(alignment: .leading, spacing: 6) {
+                permissionRow(label: "Screen Recording", granted: hasScreenPermission)
+                if includeAudio {
+                    permissionRow(label: "Microphone", granted: hasMicPermission)
+                }
+                permissionRow(
+                    label: "Output Folder",
+                    granted: hasFolderPermission,
+                    deniedLabel: "Not writable — choose a different folder"
+                )
+            }
+
+            HStack {
+                Button(permissionsButtonLabel) {
+                    requestOrOpenPermissions()
+                }
+                Spacer()
+            }
         }
         .onChange(of: includeAudio) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: AppSettings.includeAudioKey)
@@ -481,18 +540,75 @@ struct SettingsView: View {
         .onChange(of: launchAtLogin) { _, newValue in
             let service = SMAppService.mainApp
             do {
-                if newValue {
-                    try service.register()
-                } else {
-                    try service.unregister()
-                }
+                if newValue { try service.register() } else { try service.unregister() }
             } catch {
                 launchAtLogin = service.status == .enabled
             }
         }
         .padding(20)
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .frame(width: 520, alignment: .topLeading)
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissions()
+        }
     }
+
+    // MARK: - Helpers
+
+    private func refreshPermissions() {
+        hasScreenPermission = PermissionManager.hasScreenRecordingPermission
+        hasMicPermission    = PermissionManager.hasMicrophonePermission
+        hasFolderPermission = PermissionManager.hasWritePermission(for: AppSettings.outputDirectory)
+    }
+
+    private var permissionsButtonLabel: String {
+        let audioMissing = includeAudio && !hasMicPermission
+        let allGranted = hasScreenPermission && !audioMissing
+        return allGranted ? "Open System Settings..." : "Request Permissions..."
+    }
+
+    @ViewBuilder
+    private func permissionRow(label: String, granted: Bool, deniedLabel: String? = nil) -> some View {
+        HStack(spacing: 6) {
+            permissionIndicator(granted: granted)
+            Text(granted ? label : (deniedLabel ?? label))
+                .foregroundStyle(granted ? .primary : Color.orange)
+        }
+    }
+
+    @ViewBuilder
+    private func permissionIndicator(granted: Bool) -> some View {
+        Image(systemName: granted ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
+            .foregroundStyle(granted ? Color.green : Color.orange)
+    }
+
+    private func requestOrOpenPermissions() {
+        let audioMissing = includeAudio && !hasMicPermission
+        let allGranted = hasScreenPermission && !audioMissing
+        if allGranted {
+            PermissionManager.openScreenRecordingSettings()
+        } else {
+            Task { @MainActor in
+                if !hasScreenPermission {
+                    _ = await PermissionManager.requestAndWaitForScreenRecording()
+                }
+                if includeAudio && !hasMicPermission {
+                    _ = await PermissionManager.requestAndWaitForMicrophone()
+                }
+                let screenNow = PermissionManager.hasScreenRecordingPermission
+                let micNow    = PermissionManager.hasMicrophonePermission
+                hasScreenPermission = screenNow
+                hasMicPermission    = micNow
+                // If still denied after requesting, send the user to System Settings.
+                if !screenNow {
+                    PermissionManager.openScreenRecordingSettings()
+                } else if includeAudio && !micNow {
+                    PermissionManager.openMicrophoneSettings()
+                }
+            }
+        }
+    }
+
+    // MARK: - Output directory
 
     private func chooseOutputDirectory() {
         let panel = NSOpenPanel()
@@ -506,6 +622,7 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let selectedURL = panel.url {
             UserDefaults.standard.set(selectedURL.path, forKey: AppSettings.outputDirectoryPathKey)
             outputDirectoryPath = selectedURL.path
+            hasFolderPermission = PermissionManager.hasWritePermission(for: selectedURL)
         }
     }
 }
