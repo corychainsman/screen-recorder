@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+import ServiceManagement
 import SwiftUI
 
 @MainActor
@@ -136,7 +137,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let window = NSWindow(contentViewController: host)
         window.title = "Settings"
         window.styleMask = [.titled, .closable, .miniaturizable]
-        window.setContentSize(NSSize(width: 520, height: 220))
+        window.setContentSize(NSSize(width: 520, height: 240))
         window.center()
         window.isReleasedWhenClosed = false
         window.delegate = self
@@ -238,11 +239,12 @@ struct ScreenRecorderMain {
 struct SettingsView: View {
     @State private var outputDirectoryPath = AppSettings.outputDirectory.path
     @State private var includeAudio = AppSettings.includeAudio
+    @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             Text("Output Folder")
-                .font(.headline)
+                .fontWeight(.bold)
 
             HStack(spacing: 10) {
                 TextField("", text: $outputDirectoryPath)
@@ -255,14 +257,28 @@ struct SettingsView: View {
             }
 
             Text("Recordings are saved as MP4 files in this directory.")
-                .font(.footnote)
                 .foregroundStyle(.secondary)
 
             Toggle("Include audio from the default audio source", isOn: $includeAudio)
-                .toggleStyle(.switch)
+                .toggleStyle(.checkbox)
+
+            Toggle("Launch at login", isOn: $launchAtLogin)
+                .toggleStyle(.checkbox)
         }
         .onChange(of: includeAudio) { _, newValue in
             UserDefaults.standard.set(newValue, forKey: AppSettings.includeAudioKey)
+        }
+        .onChange(of: launchAtLogin) { _, newValue in
+            let service = SMAppService.mainApp
+            do {
+                if newValue {
+                    try service.register()
+                } else {
+                    try service.unregister()
+                }
+            } catch {
+                launchAtLogin = service.status == .enabled
+            }
         }
         .padding(20)
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
