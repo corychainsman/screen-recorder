@@ -66,9 +66,11 @@ final class ScreenRecorder: NSObject, ObservableObject {
             configuration.queueDepth = 6
             configuration.showsCursor = true
             configuration.capturesAudio = AppSettings.includeAudio
+            configuration.sampleRate = 48000
+            configuration.channelCount = 2
             configuration.presenterOverlayPrivacyAlertSetting = .never
             if #available(macOS 15.0, *) {
-                configuration.captureMicrophone = false
+                configuration.captureMicrophone = AppSettings.includeAudio
             }
 
             let recordingConfig = SCRecordingOutputConfiguration()
