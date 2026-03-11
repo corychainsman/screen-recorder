@@ -7,7 +7,8 @@ let package = Package(
         .macOS(.v15)
     ],
     products: [
-        .executable(name: "ScreenRecorder", targets: ["ScreenRecorderApp"])
+        .executable(name: "ScreenRecorder", targets: ["ScreenRecorderApp"]),
+        .executable(name: "TestRecorderApp", targets: ["TestRecorderApp"]),
     ],
     targets: [
         .executableTarget(
@@ -19,6 +20,16 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia")
             ]
-        )
+        ),
+        .executableTarget(
+            name: "TestRecorderApp",
+            path: "Sources/TestRecorderApp",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
+                .linkedFramework("ScreenCaptureKit"),
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreMedia"),
+            ]
+        ),
     ]
 )
