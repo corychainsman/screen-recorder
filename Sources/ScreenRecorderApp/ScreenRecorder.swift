@@ -44,8 +44,10 @@ final class ScreenRecorder: NSObject, ObservableObject {
     private var stream: SCStream?
     private var recordingOutput: SCRecordingOutput?
     private var outputURL: URL?
+    /// Resumed by `recordingOutputDidFinishRecording` once the file is fully written to disk.
+    private var finishedContinuation: CheckedContinuation<Void, Never>?
 
-    func startRecording() async {
+    func startRecording(display chosenDisplay: SCDisplay? = nil) async {
         guard !isRecording else { return }
 
         do {
@@ -55,8 +57,17 @@ final class ScreenRecorder: NSObject, ObservableObject {
             self.statusMessage = "Starting..."
 
             let content = try await SCShareableContent.current
-            guard let display = content.displays.first else {
-                throw RecorderError.noDisplayFound
+            let display: SCDisplay
+            if let chosenDisplay {
+                guard let found = content.displays.first(where: { $0.displayID == chosenDisplay.displayID }) else {
+                    throw RecorderError.noDisplayFound
+                }
+                display = found
+            } else {
+                guard let first = content.displays.first else {
+                    throw RecorderError.noDisplayFound
+                }
+                display = first
             }
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
@@ -111,15 +122,21 @@ final class ScreenRecorder: NSObject, ObservableObject {
         let outputDirectory = AppSettings.outputDirectory.path
 
         do {
-            try await stream?.stopCapture()
+            // Suspend until recordingOutputDidFinishRecording fires, which means
+            // the file is fully written to disk and safe to reveal in Finder.
+            await withCheckedContinuation { continuation in
+                self.finishedContinuation = continuation
+                Task {
+                    do { try await self.stream?.stopCapture() }
+                    catch { /* stopCapture error — continuation will still be resumed by delegate or fallback below */ }
+                }
+            }
             if let savedURL = outputURL {
                 lastOutputPath = savedURL.path
                 statusMessage = "Saved to \(outputDirectory)"
             } else {
                 statusMessage = "Recording stopped"
             }
-        } catch {
-            statusMessage = "Failed to stop cleanly: \(error.localizedDescription)"
         }
 
         let savedURL = outputURL
@@ -154,6 +171,9 @@ extension ScreenRecorder: SCRecordingOutputDelegate {
             self?.isRecording = false
             self?.statusMessage = "Recording failed: \(error.localizedDescription)"
             self?.cleanupCaptureObjects()
+            // Unblock stopRecording() if it's waiting.
+            self?.finishedContinuation?.resume()
+            self?.finishedContinuation = nil
         }
     }
 
@@ -164,6 +184,9 @@ extension ScreenRecorder: SCRecordingOutputDelegate {
                 self.lastOutputPath = outputURL.path
                 self.statusMessage = "Saved to \(outputURL.deletingLastPathComponent().path)"
             }
+            // Resume the continuation in stopRecording() so it can return the finalized URL.
+            finishedContinuation?.resume()
+            finishedContinuation = nil
         }
     }
 }

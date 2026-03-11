@@ -9,6 +9,7 @@ let package = Package(
     products: [
         .executable(name: "ScreenRecorder", targets: ["ScreenRecorderApp"]),
         .executable(name: "TestRecorderApp", targets: ["TestRecorderApp"]),
+        .executable(name: "TestUIApp", targets: ["TestUIApp"]),
     ],
     targets: [
         .executableTarget(
@@ -29,6 +30,13 @@ let package = Package(
                 .linkedFramework("ScreenCaptureKit"),
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
+            ]
+        ),
+        .executableTarget(
+            name: "TestUIApp",
+            path: "Sources/TestUIApp",
+            linkerSettings: [
+                .linkedFramework("AppKit"),
             ]
         ),
     ]

@@ -2,6 +2,7 @@ import AppKit
 import Combine
 import Darwin
 import Foundation
+@preconcurrency import ScreenCaptureKit
 import ServiceManagement
 import SwiftUI
 
@@ -15,6 +16,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
     private var isToggling = false
     private var singleInstanceLock: SingleInstanceLock?
+    private var selectionManager: ScreenSelectionManager?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         let lock = SingleInstanceLock(lockPath: "/tmp/screen-recorder-menubar.lock")
@@ -106,44 +108,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     @objc
     private func toggleRecording() {
         guard !isToggling else { return }
-        isToggling = true
 
+        if recorder.isRecording {
+            isToggling = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.isToggling = false }
+                if let outputURL = await self.recorder.stopRecording() {
+                    self.revealInFinder(outputURL)
+                }
+            }
+            return
+        }
+
+        // Starting — check if multi-display selection is needed
+        isToggling = true
         Task { @MainActor [weak self] in
             guard let self else { return }
-            defer { self.isToggling = false }
 
-            if self.recorder.isRecording {
-                if let outputURL = await self.recorder.stopRecording() {
-                    let folderPath = outputURL.deletingLastPathComponent().path
-                    let filePath = outputURL.path
-                    let script = """
-                    tell application "Finder"
-                        set targetFolder to POSIX file "\(folderPath)" as alias
-                        set targetFile to POSIX file "\(filePath)" as alias
-                        set foundWindow to missing value
-                        repeat with w in Finder windows
-                            if (target of w) is equal to targetFolder then
-                                set foundWindow to w
-                                exit repeat
-                            end if
-                        end repeat
-                        if foundWindow is missing value then
-                            set foundWindow to make new Finder window to targetFolder
-                        end if
-                        select targetFile
-                        set index of foundWindow to 1
-                        activate
-                    end tell
-                    """
-                    if let appleScript = NSAppleScript(source: script) {
-                        var error: NSDictionary?
-                        appleScript.executeAndReturnError(&error)
+            do {
+                let content = try await SCShareableContent.current
+                let displays = content.displays
+
+                if displays.count <= 1 {
+                    defer { self.isToggling = false }
+                    await self.recorder.startRecording()
+                } else {
+                    // Present picker; isToggling stays true until a selection or cancel
+                    let manager = ScreenSelectionManager(displays: displays) { [weak self] chosen in
+                        guard let self else { return }
+                        defer { self.isToggling = false }
+                        self.selectionManager = nil
+                        guard let chosen else { return } // cancelled
+                        Task { @MainActor in
+                            await self.recorder.startRecording(display: chosen)
+                        }
                     }
+                    self.selectionManager = manager
+                    manager.present()
                 }
-            } else {
-                await self.recorder.startRecording()
+            } catch {
+                self.isToggling = false
             }
         }
+    }
+
+    private func revealInFinder(_ outputURL: URL) {
+        NSWorkspace.shared.activateFileViewerSelecting([outputURL])
     }
 
     @objc
@@ -209,6 +220,181 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 extension AppDelegate: NSWindowDelegate {
     func windowWillClose(_ notification: Notification) {
         NSApp.setActivationPolicy(.accessory)
+    }
+}
+
+// MARK: - Screen selection overlay
+
+/// Presents a full-screen semi-transparent overlay on every display, showing a large number
+/// so the user can click or type a digit to choose which screen to record.
+@MainActor
+final class ScreenSelectionManager: NSObject {
+    private let displays: [SCDisplay]
+    private let completion: (SCDisplay?) -> Void
+
+    private var overlayWindows: [NSWindow] = []
+    private var localMonitor: Any?
+    private var globalMonitor: Any?
+
+    init(displays: [SCDisplay], completion: @escaping (SCDisplay?) -> Void) {
+        self.displays = displays
+        self.completion = completion
+    }
+
+    func present() {
+        // Build one overlay window per NSScreen, matched to SCDisplay via CGDirectDisplayID
+        for (index, screen) in NSScreen.screens.enumerated() {
+            guard let scDisplay = scDisplay(for: screen) else { continue }
+
+            let window = makeOverlayWindow(screen: screen, number: index + 1, scDisplay: scDisplay)
+            overlayWindows.append(window)
+            window.orderFrontRegardless()
+        }
+
+        // Activate the app and make the first overlay the key window so that
+        // keyDown events are delivered to the local event monitor.
+        NSApp.activate(ignoringOtherApps: true)
+        overlayWindows.first?.makeKeyAndOrderFront(nil)
+
+        installEventMonitors()
+    }
+
+    // MARK: - Private
+
+    private func scDisplay(for screen: NSScreen) -> SCDisplay? {
+        guard
+            let screenID = screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? CGDirectDisplayID
+        else { return nil }
+        return displays.first(where: { $0.displayID == screenID })
+    }
+
+    private func makeOverlayWindow(screen: NSScreen, number: Int, scDisplay: SCDisplay) -> NSWindow {
+        let frame = screen.frame
+        let window = OverlayWindow(
+            contentRect: frame,
+            styleMask: .borderless,
+            backing: .buffered,
+            defer: false
+        )
+        window.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 1)
+        window.backgroundColor = NSColor(white: 0, alpha: 0.55)
+        window.isOpaque = false
+        window.hasShadow = false
+        window.ignoresMouseEvents = false
+        window.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        window.isReleasedWhenClosed = false
+
+        // Large centered number label
+        let fontSize = min(frame.width, frame.height) * 0.28
+        let label = NSTextField(labelWithString: "\(number)")
+        label.font = NSFont.boldSystemFont(ofSize: fontSize)
+        label.textColor = .white
+        label.isBezeled = false
+        label.drawsBackground = false
+        label.isEditable = false
+        label.isSelectable = false
+        label.alignment = .center
+        label.sizeToFit()
+
+        // Center the label in the window's content view
+        let contentView = NSView(frame: NSRect(origin: .zero, size: frame.size))
+        contentView.wantsLayer = true
+        label.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(label)
+        NSLayoutConstraint.activate([
+            label.centerXAnchor.constraint(equalTo: contentView.centerXAnchor),
+            label.centerYAnchor.constraint(equalTo: contentView.centerYAnchor),
+        ])
+        window.contentView = contentView
+
+        // Handle mouse-down in the overlay itself
+        window.clickHandler = { [weak self] in
+            self?.select(atIndex: number - 1)
+        }
+
+        return window
+    }
+
+    private func installEventMonitors() {
+        // Local monitor — events inside our overlay windows
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { [weak self] event in
+            self?.handle(event: event)
+            return nil // consume the event
+        }
+        // Global monitor — events outside our windows (user clicks on another screen's overlay
+        // which may be the "active" space from AppKit's perspective)
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { [weak self] event in
+            self?.handle(event: event)
+        }
+    }
+
+    private func handle(event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            handleClick(at: event.locationInWindow, window: event.window)
+        case .keyDown:
+            handleKey(event: event)
+        default:
+            break
+        }
+    }
+
+    private func handleClick(at locationInWindow: NSPoint, window: NSWindow?) {
+        // Find which overlay was clicked by hit-testing the cursor position (screen coords)
+        let screenPoint = NSEvent.mouseLocation
+        for (index, overlay) in overlayWindows.enumerated() {
+            if NSMouseInRect(screenPoint, overlay.frame, false) {
+                select(atIndex: index)
+                return
+            }
+        }
+    }
+
+    private func handleKey(event: NSEvent) {
+        // Escape → cancel
+        if event.keyCode == 53 {
+            dismiss(chosen: nil)
+            return
+        }
+        // Map both top-row and numpad key codes to digits 1–9
+        let keyCodeToDigit: [UInt16: Int] = [
+            18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9,  // top row
+            83: 1, 84: 2, 85: 3, 86: 4, 87: 5, 88: 6, 89: 7, 91: 8, 92: 9   // numpad
+        ]
+        guard let digit = keyCodeToDigit[event.keyCode], digit <= overlayWindows.count else { return }
+        select(atIndex: digit - 1)
+    }
+
+    private func select(atIndex index: Int) {
+        // Map overlay index → SCDisplay via NSScreen order
+        let screens = NSScreen.screens
+        guard index < screens.count else { dismiss(chosen: nil); return }
+        let screen = screens[index]
+        guard let chosen = scDisplay(for: screen) else { dismiss(chosen: nil); return }
+        dismiss(chosen: chosen)
+    }
+
+    private func dismiss(chosen: SCDisplay?) {
+        // Remove monitors first to prevent re-entrancy
+        if let m = localMonitor { NSEvent.removeMonitor(m); localMonitor = nil }
+        if let m = globalMonitor { NSEvent.removeMonitor(m); globalMonitor = nil }
+
+        for window in overlayWindows { window.close() }
+        overlayWindows.removeAll()
+
+        completion(chosen)
+    }
+}
+
+/// Borderless overlay window that forwards mouse-down to a handler closure.
+private final class OverlayWindow: NSWindow {
+    var clickHandler: (() -> Void)?
+
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+
+    override func mouseDown(with event: NSEvent) {
+        clickHandler?()
     }
 }
 
