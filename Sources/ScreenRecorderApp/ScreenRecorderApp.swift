@@ -114,7 +114,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
             if self.recorder.isRecording {
                 if let outputURL = await self.recorder.stopRecording() {
-                    NSWorkspace.shared.activateFileViewerSelecting([outputURL])
+                    let folderPath = outputURL.deletingLastPathComponent().path
+                    let filePath = outputURL.path
+                    let script = """
+                    tell application "Finder"
+                        set targetFolder to POSIX file "\(folderPath)" as alias
+                        set targetFile to POSIX file "\(filePath)" as alias
+                        set foundWindow to missing value
+                        repeat with w in Finder windows
+                            if (target of w) is equal to targetFolder then
+                                set foundWindow to w
+                                exit repeat
+                            end if
+                        end repeat
+                        if foundWindow is missing value then
+                            set foundWindow to make new Finder window to targetFolder
+                        end if
+                        select targetFile
+                        set index of foundWindow to 1
+                        activate
+                    end tell
+                    """
+                    if let appleScript = NSAppleScript(source: script) {
+                        var error: NSDictionary?
+                        appleScript.executeAndReturnError(&error)
+                    }
                 }
             } else {
                 await self.recorder.startRecording()
