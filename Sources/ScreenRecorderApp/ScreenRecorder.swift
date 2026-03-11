@@ -1,4 +1,5 @@
 import AVFoundation
+import CoreGraphics
 import CoreMedia
 import Foundation
 @preconcurrency import ScreenCaptureKit
@@ -60,9 +61,16 @@ final class ScreenRecorder: NSObject, ObservableObject {
 
             let filter = SCContentFilter(display: display, excludingWindows: [])
             let configuration = SCStreamConfiguration()
-            configuration.width = display.width
-            configuration.height = display.height
-            configuration.minimumFrameInterval = CMTime(value: 1, timescale: 60)
+
+            let displayMode = CGDisplayCopyDisplayMode(display.displayID)
+            let pixelWidth = displayMode?.pixelWidth ?? display.width
+            let pixelHeight = displayMode?.pixelHeight ?? display.height
+            let refreshRate = displayMode?.refreshRate ?? 60.0
+            let fps = refreshRate > 0 ? refreshRate : 60.0
+
+            configuration.width = pixelWidth
+            configuration.height = pixelHeight
+            configuration.minimumFrameInterval = CMTime(value: 1, timescale: CMTimeScale(fps))
             configuration.queueDepth = 6
             configuration.showsCursor = true
             configuration.capturesAudio = AppSettings.includeAudio
