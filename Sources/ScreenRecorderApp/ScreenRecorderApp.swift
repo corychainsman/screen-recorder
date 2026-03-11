@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         singleInstanceLock = lock
 
+        NSApp.applicationIconImage = makeAppIcon()
         configureStatusItem()
         observeRecorderState()
     }
@@ -122,13 +123,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc
     private func openSettings() {
-        let view = SettingsView()
-        let host = NSHostingController(rootView: view)
+        activateAsRegularApp()
 
         if let window = settingsWindowController?.window {
             window.makeKeyAndOrderFront(nil)
             return
         }
+
+        let view = SettingsView()
+        let host = NSHostingController(rootView: view)
 
         let window = NSWindow(contentViewController: host)
         window.title = "Settings"
@@ -136,15 +139,51 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.setContentSize(NSSize(width: 520, height: 220))
         window.center()
         window.isReleasedWhenClosed = false
+        window.delegate = self
 
         let controller = NSWindowController(window: window)
         settingsWindowController = controller
         controller.showWindow(nil)
     }
 
+    private func activateAsRegularApp() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.applicationIconImage = makeAppIcon()
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
     @objc
     private func quitApp() {
         NSApp.terminate(nil)
+    }
+
+    private func makeAppIcon() -> NSImage {
+        let size = NSSize(width: 1024, height: 1024)
+        let image = NSImage(size: size)
+        image.lockFocus()
+
+        // Dark grey background
+        NSColor(srgbRed: 0.173, green: 0.173, blue: 0.180, alpha: 1).setFill()
+        NSBezierPath(rect: NSRect(origin: .zero, size: size)).fill()
+
+        // Red recording dot (radius ~38% of canvas)
+        let dotRadius = size.width * 0.38
+        let center = CGPoint(x: size.width / 2, y: size.height / 2)
+        let dotRect = NSRect(
+            x: center.x - dotRadius, y: center.y - dotRadius,
+            width: dotRadius * 2, height: dotRadius * 2
+        )
+        NSColor(srgbRed: 1.0, green: 0.231, blue: 0.188, alpha: 1).setFill()
+        NSBezierPath(ovalIn: dotRect).fill()
+
+        image.unlockFocus()
+        return image
+    }
+}
+
+extension AppDelegate: NSWindowDelegate {
+    func windowWillClose(_ notification: Notification) {
+        NSApp.setActivationPolicy(.accessory)
     }
 }
 
